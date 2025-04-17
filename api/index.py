@@ -1,85 +1,54 @@
-"""
-Vercel serverless function for Telegram bot webhook.
-"""
-import json
+from http.server import BaseHTTPRequestHandler
 import os
-import logging
-import traceback
-from flask import Flask, request, jsonify
 import telebot
-from user_storage import initialize_user_storage
+import json
 
-# Configure logging
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+# Initialize the bot with your token
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+bot = telebot.TeleBot(TOKEN)
 
-# Initialize Flask app
-app = Flask(__name__)
-
-# Initialize bot with token from environment
-token = os.environ.get("TELEGRAM_BOT_TOKEN")
-if not token:
-    logger.error("No TELEGRAM_BOT_TOKEN set in environment variables")
-
-# Initialize the bot if token is available
-from bot import create_bot
-bot = create_bot(token) if token else None
-
-# Initialize storage
-try:
-    initialize_user_storage()
-except Exception as e:
-    logger.error(f"Error initializing storage: {str(e)}")
-
-@app.route('/', methods=['GET'])
-def home():
-    """Health check endpoint."""
-    return jsonify({"status": "alive", "service": "Telegram Bot Webhook"})
-
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    """Process webhook updates from Telegram."""
-    if not bot:
-        return jsonify({"error": "Bot not initialized. Missing TELEGRAM_BOT_TOKEN"}), 500
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        # Parse incoming Telegram update
+        content_length = int(self.headers['Content-Length'])
+        post_data = self.rfile.read(content_length)
         
-    if request.headers.get('content-type') == 'application/json':
+        # Send 200 response first
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "success"}).encode())
+        
+        # Process the update
         try:
-            json_string = request.get_data().decode('utf-8')
-            update = telebot.types.Update.de_json(json_string)
+            update = telebot.types.Update.de_json(post_data.decode('utf-8'))
             bot.process_new_updates([update])
-            return jsonify({"status": "success"})
         except Exception as e:
-            logger.error(f"Error processing update: {str(e)}")
-            logger.error(traceback.format_exc())
-            return jsonify({"error": str(e)}), 500
-    else:
-        return jsonify({"error": "Invalid content type"}), 400
-
-@app.route('/set-webhook', methods=['GET'])
-def set_webhook():
-    """Set webhook URL for the bot."""
-    if not bot:
-        return jsonify({"error": "Bot not initialized. Missing TELEGRAM_BOT_TOKEN"}), 500
-        
-    try:
-        # Get custom URL or construct from request
-        url = request.args.get('url')
-        if not url:
-            host = request.headers.get('x-forwarded-host', request.host)
-            proto = request.headers.get('x-forwarded-proto', 'https')
-            url = f"{proto}://{host}/api/webhook"
-            
-        # Set the webhook
-        bot.remove_webhook()
-        bot.set_webhook(url=url)
-        return jsonify({
-            "success": True,
-            "webhook_url": url
-        })
-    except Exception as e:
-        logger.error(f"Error setting webhook: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({"error": str(e)}), 500
+            print(f"Error processing update: {str(e)}")
+    
+    def do_GET(self):
+        # This is for health checks and webhook setup
+        if self.path == '/api/set-webhook':
+            try:
+                url = f"https://{self.headers.get('Host')}/api"
+                webhook_response = bot.set_webhook(url=url)
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "status": "success", 
+                    "webhook_set": webhook_response,
+                    "webhook_url": url
+                }).encode())
+            except Exception as e:
+                self.send_response(500)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e)}).encode())
+        else:
+            # Default response
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write('Telegram bot webhook is running!'.encode())
